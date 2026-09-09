@@ -6,15 +6,16 @@ from mne.datasets import eegbci
 from mne.channels import make_standard_montage
 from mne.io import concatenate_raws, read_raw_edf
 
+MOTOR_CHANNELS = [
+    'FC5', 'FC3', 'FC1', 'FCz', 'FC2', 'FC4', 'FC6',
+    'C5',  'C3',  'C1',  'Cz',  'C2',  'C4',  'C6',
+    'CP5', 'CP3', 'CP1', 'CPz', 'CP2', 'CP4', 'CP6'
+]
+
 def download_edf_file(subject_id: int, run_id: int) -> Path:
-    """
-    Downloads an EDF file directly from PhysioNet, explicitly overriding
-    macOS SSL certificate checks.
-    """
     sub_str = f"S{subject_id:03d}"
     run_str = f"{sub_str}R{run_id:02d}.edf"
     
-    # Match standard MNE cache directory structure
     base_dir = Path.home() / "mne_data" / "MNE-eegbci-data" / "files" / "eegmmidb" / "1.0.0" / sub_str
     base_dir.mkdir(parents=True, exist_ok=True)
     file_path = base_dir / run_str
@@ -32,13 +33,6 @@ def download_edf_file(subject_id: int, run_id: int) -> Path:
             out_file.write(response.read())
             
     return file_path
-
-# Standard 21-channel motor cortex layout surrounding C3, Cz, and C4
-MOTOR_CHANNELS = [
-    'FC5', 'FC3', 'FC1', 'FCz', 'FC2', 'FC4', 'FC6',
-    'C5',  'C3',  'C1',  'Cz',  'C2',  'C4',  'C6',
-    'CP5', 'CP3', 'CP1', 'CPz', 'CP2', 'CP4', 'CP6'
-]
 
 def preprocess_subject(
     subject_id: int, 
@@ -61,9 +55,10 @@ def preprocess_subject(
     montage = make_standard_montage('standard_1020')
     raw.set_montage(montage, verbose=False)
     
-    # Restrict to motor cortex subset if requested
+    # Updated: use modern inst.pick() API
     if motor_only:
-        raw.pick_channels([ch for ch in MOTOR_CHANNELS if ch in raw.ch_names])
+        valid_channels = [ch for ch in MOTOR_CHANNELS if ch in raw.ch_names]
+        raw.pick(valid_channels)
         
     raw.filter(l_freq=l_freq, h_freq=h_freq, fir_design='firwin', verbose=False)
     
