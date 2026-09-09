@@ -22,8 +22,6 @@ def download_edf_file(subject_id: int, run_id: int) -> Path:
     
     if not file_path.exists():
         url = f"https://physionet.org/files/eegmmidb/1.0.0/{sub_str}/{run_str}"
-        print(f"Downloading {run_str}...")
-        
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -34,14 +32,32 @@ def download_edf_file(subject_id: int, run_id: int) -> Path:
             
     return file_path
 
+def sanitize_annotations(raw: mne.io.Raw) -> mne.io.Raw:
+    """
+    Rebuilds raw.annotations containing strictly T1 and T2 descriptions.
+    Prevents MNE int('') conversion errors on corrupted EDF metadata (e.g., S016).
+    """
+    clean_annot = []
+    for ann in raw.annotations:
+        desc = str(ann['description']).strip()
+        if desc in ['T1', 'T2']:
+            clean_annot.append((ann['onset'], ann['duration'], desc))
+            
+    if not clean_annot:
+        raise ValueError("No T1 or T2 annotations found in data.")
+        
+    onsets, durations, descriptions = zip(*clean_annot)
+    raw.set_annotations(mne.Annotations(onset=onsets, duration=durations, description=descriptions))
+    return raw
+
 def preprocess_subject(
     subject_id: int, 
-    runs: list = [4, 8, 12], 
+    runs: list = [3, 7, 11], 
     l_freq: float = 8.0, 
     h_freq: float = 30.0, 
     tmin: float = 0.5, 
     tmax: float = 3.5,
-    motor_only: bool = False
+    motor_only: bool = True
 ) -> mne.Epochs:
     raw_fnames = [str(download_edf_file(subject_id, r)) for r in runs]
     raws = [read_raw_edf(f, preload=True, verbose=False) for f in raw_fnames]
@@ -55,15 +71,18 @@ def preprocess_subject(
     montage = make_standard_montage('standard_1020')
     raw.set_montage(montage, verbose=False)
     
-    # Updated: use modern inst.pick() API
     if motor_only:
         valid_channels = [ch for ch in MOTOR_CHANNELS if ch in raw.ch_names]
         raw.pick(valid_channels)
         
     raw.filter(l_freq=l_freq, h_freq=h_freq, fir_design='firwin', verbose=False)
     
-    events, event_id = mne.events_from_annotations(raw, verbose=False)
-    target_event_id = {k: v for k, v in event_id.items() if k in ['T1', 'T2']}
+    raw = sanitize_annotations(raw)
+    
+    event_mapping = {'T1': 1, 'T2': 2}
+    events, target_event_id = mne.events_from_annotations(
+        raw, event_id=event_mapping, verbose=False
+    )
     
     epochs = mne.Epochs(
         raw, 

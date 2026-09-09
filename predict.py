@@ -30,7 +30,7 @@ def apply_euclidean_alignment(X: np.ndarray) -> np.ndarray:
         X_aligned[i] = inv_sqrt_cov @ X[i]
     return X_aligned
 
-def predict_edf(edf_path: str, model_path: str = "models/global_csp_lda.joblib") -> dict:
+def predict_edf(edf_path: str, model_path: str = "models/global_riemann_model.joblib") -> dict:
     if not Path(model_path).exists():
         raise FileNotFoundError(f"Model file not found at {model_path}. Run train script first.")
         
@@ -50,20 +50,21 @@ def predict_edf(edf_path: str, model_path: str = "models/global_csp_lda.joblib")
     
     raw.filter(l_freq=8.0, h_freq=30.0, fir_design='firwin', verbose=False)
     
-    events, event_id = mne.events_from_annotations(raw, verbose=False)
-    target_event_id = {k: v for k, v in event_id.items() if k in ['T1', 'T2']}
+    # Strip non-task annotations before extracting events
+    valid_idx = [i for i, desc in enumerate(raw.annotations.description) if desc.strip() in ['T1', 'T2']]
+    if not valid_idx:
+        raise ValueError("No T1 or T2 annotations found in the provided EDF file.")
+    raw.set_annotations(raw.annotations[valid_idx])
     
-    if not target_event_id:
-        raise ValueError("No T1 or T2 events found in the provided EDF file.")
-        
+    event_mapping = {'T1': 1, 'T2': 2}
+    events, target_event_id = mne.events_from_annotations(raw, event_id=event_mapping, verbose=False)
+    
     epochs = mne.Epochs(
         raw, events=events, event_id=target_event_id, 
         tmin=0.5, tmax=3.5, baseline=None, preload=True, verbose=False
     )
     
     X = epochs.get_data(copy=True)
-    
-    # Align incoming test session covariance
     X_aligned = apply_euclidean_alignment(X)
     
     preds = model.predict(X_aligned).tolist()
@@ -79,7 +80,7 @@ def predict_edf(edf_path: str, model_path: str = "models/global_csp_lda.joblib")
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict Motor Imagery from raw EDF file.")
     parser.add_argument("--input", type=str, required=True, help="Path to raw EDF file")
-    parser.add_argument("--model", type=str, default="models/global_csp_lda.joblib", help="Path to saved joblib model")
+    parser.add_argument("--model", type=str, default="models/global_riemann_model.joblib", help="Path to saved joblib model")
     
     args = parser.parse_args()
     results = predict_edf(args.input, args.model)
