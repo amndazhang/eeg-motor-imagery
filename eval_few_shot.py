@@ -1,42 +1,37 @@
 import numpy as np
-import scipy.linalg
 from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.linear_model import LogisticRegression
-from pyriemann.estimation import Covariances
-from pyriemann.tangentspace import TangentSpace
+from sklearn.feature_selection import SelectKBest, mutual_info_classif
 from src.data_loader import load_dataset
+from src.models import FilterBankTangentSpace
 
-def inv_sqrt_m(cov_mat: np.ndarray) -> np.ndarray:
-    """Computes R^(-1/2) for Euclidean Space Alignment."""
-    evals, evecs = scipy.linalg.eigh(cov_mat)
-    evals = np.maximum(evals, 1e-10)
-    return evecs @ np.diag(1.0 / np.sqrt(evals)) @ evecs.T
-
-def run_few_shot_benchmark():
+def run_fb_riemann_few_shot():
     test_subjects = list(range(1, 61))
-    print("Loading raw trial data for 60 subjects...", flush=True)
+    print("Loading raw trial data for 60 subjects (full 3.0s trials)...", flush=True)
     
     X_raw, y_raw, groups = load_dataset(
         subject_ids=test_subjects, 
         runs=[4, 8, 12], 
         motor_only=True, 
-        use_esa=False,
+        use_esa=True,
         use_sliding_window=False
     )
     
-    print("Pre-calculating covariance matrices for all trials...", flush=True)
-    cov_estimator = Covariances(estimator='lwf')
-    C_all = cov_estimator.fit_transform(X_raw)  # Matrix shape: (N_trials, 21, 21)
+    print("\nExtracting Filter Bank Tangent features across 6 frequency sub-bands...", flush=True)
+    fb_transformer = FilterBankTangentSpace(sfreq=160.0)
+    T_all = fb_transformer.fit_transform(X_raw)  # Matrix shape: (N_trials, 1386)
+    
+    print(f"Extracted {T_all.shape[1]} spatio-spectral tangent features per trial.", flush=True)
     
     logo = LeaveOneGroupOut()
     
     for k_shots in [2, 4, 6]:
         scores = []
-        print(f"\nEvaluating Few-Shot Calibration for k={k_shots} trials...", flush=True)
+        print(f"\nEvaluating FBRiemann Few-Shot Calibration for k={k_shots} trials...", flush=True)
         
-        for fold, (train_idx, test_idx) in enumerate(logo.split(C_all, y_raw, groups=groups)):
-            C_train, y_train = C_all[train_idx], y_raw[train_idx]
-            C_test_sub, y_test_sub = C_all[test_idx], y_raw[test_idx]
+        for fold, (train_idx, test_idx) in enumerate(logo.split(T_all, y_raw, groups=groups)):
+            T_train, y_train = T_all[train_idx], y_raw[train_idx]
+            T_test_sub, y_test_sub = T_all[test_idx], y_raw[test_idx]
             
             idx_c0 = np.where(y_test_sub == 0)[0]
             idx_c1 = np.where(y_test_sub == 1)[0]
@@ -48,40 +43,25 @@ def run_few_shot_benchmark():
             calib_idx = np.concatenate([idx_c0[:half_k], idx_c1[:half_k]])
             eval_idx = np.setdiff1d(np.arange(len(y_test_sub)), calib_idx)
             
-            C_calib, y_calib = C_test_sub[calib_idx], y_test_sub[calib_idx]
-            C_eval, y_eval = C_test_sub[eval_idx], y_test_sub[eval_idx]
+            T_calib, y_calib = T_test_sub[calib_idx], y_test_sub[calib_idx]
+            T_eval, y_eval = T_test_sub[eval_idx], y_test_sub[eval_idx]
             
-            # 1. Global training alignment reference
-            R_global = np.mean(C_train, axis=0)
-            inv_R_global = inv_sqrt_m(R_global)
+            # Select top 120 most informative spatio-spectral features
+            selector = SelectKBest(score_func=mutual_info_classif, k=120)
+            T_train_sel = selector.fit_transform(T_train, y_train)
+            T_calib_sel = selector.transform(T_calib)
+            T_eval_sel = selector.transform(T_eval)
             
-            # Direct covariance matrix alignment
-            C_train_aligned = np.array([inv_R_global @ c @ inv_R_global for c in C_train])
+            # Train global classifier
+            clf = LogisticRegression(C=0.15, solver='lbfgs', max_iter=500)
+            clf.fit(T_train_sel, y_train)
             
-            # 2. Fit global Tangent Space Classifier
-            ts = TangentSpace(metric='riemann')
-            T_train = ts.fit_transform(C_train_aligned)
-            
-            clf = LogisticRegression(C=0.1, solver='lbfgs', max_iter=500)
-            clf.fit(T_train, y_train)
-            
-            # 3. Target calibration covariance (blended 50/50 with global mean for matrix stability)
-            R_calib = np.mean(C_calib, axis=0)
-            R_target = 0.5 * R_global + 0.5 * R_calib
-            inv_R_target = inv_sqrt_m(R_target)
-            
-            C_calib_aligned = np.array([inv_R_target @ c @ inv_R_target for c in C_calib])
-            C_eval_aligned = np.array([inv_R_target @ c @ inv_R_target for c in C_eval])
-            
-            T_calib = ts.transform(C_calib_aligned)
-            T_eval = ts.transform(C_eval_aligned)
-            
-            # 4. Fine-tune intercept shift on calibration logits without touching directional weights
-            logits_calib = (T_calib @ clf.coef_.T + clf.intercept_).ravel()
+            # Fine-tune intercept shift on target user calibration samples
+            logits_calib = (T_calib_sel @ clf.coef_.T + clf.intercept_).ravel()
             calib_labels_signed = np.where(y_calib == 1, 1.0, -1.0)
             bias_shift = np.mean(calib_labels_signed - logits_calib) * 0.15
             
-            logits_eval = (T_eval @ clf.coef_.T + (clf.intercept_ + bias_shift)).ravel()
+            logits_eval = (T_eval_sel @ clf.coef_.T + (clf.intercept_ + bias_shift)).ravel()
             preds = np.where(logits_eval >= 0, 1, 0)
             
             scores.append(np.mean(preds == y_eval))
@@ -89,7 +69,7 @@ def run_few_shot_benchmark():
             if (fold + 1) % 20 == 0:
                 print(f"  Processed {fold + 1}/60 subjects...", flush=True)
                 
-        print(f"--> Few-Shot Accuracy (k={k_shots} Calibration Trials): {np.mean(scores) * 100:.1f}%")
+        print(f"--> FBRiemann Few-Shot Accuracy (k={k_shots} Calibration Trials): {np.mean(scores) * 100:.1f}%")
 
 if __name__ == "__main__":
-    run_few_shot_benchmark()
+    run_fb_riemann_few_shot()
