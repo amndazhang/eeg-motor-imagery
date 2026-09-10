@@ -20,17 +20,19 @@ def evaluate_loso_model(X: np.ndarray, y: np.ndarray, groups: np.ndarray) -> dic
     return scores
 
 if __name__ == "__main__":
-    # Scaled from 20 to 60 subjects
     test_subjects = list(range(1, 61))
-    print("Loading data for subjects 1-60 with Euclidean Alignment...\n")
+    print("Loading 60 subjects with ESA and Sliding Window Augmentation...\n")
     
     X, y, groups = load_dataset(
         subject_ids=test_subjects, 
         runs=[4, 8, 12], 
         motor_only=True, 
-        use_esa=True
+        use_esa=True,
+        use_sliding_window=True
     )
     
-    print("--- Evaluating Riemannian Tangent Space (LOSO 60 Subjects) ---")
+    print(f"Dataset expanded: {X.shape[0]} windows, {X.shape[1]} channels, {X.shape[2]} timepoints per window.")
+    
+    print("\n--- Evaluating Riemannian Tangent Space + Sliding Window (LOSO 60 Subjects) ---")
     riemann_scores = evaluate_loso_model(X, y, groups)
-    print(f"\nMean Riemannian LOSO Accuracy (60 Subjects): {np.mean(list(riemann_scores.values())) * 100:.1f}%")
+    print(f"\nMean Riemannian Augment LOSO Accuracy (60 Subjects): {np.mean(list(riemann_scores.values())) * 100:.1f}%")
