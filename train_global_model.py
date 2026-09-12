@@ -29,11 +29,13 @@ def extract_subject_epochs(subject_id: int, runs: list):
             edf_path = mne.datasets.eegbci.load_data(subject_id, run, update_path=True, verbose=False)[0]
             raw = mne.io.read_raw_edf(edf_path, preload=True)
             raw.rename_channels(lambda x: x.strip('.').strip().upper())
-            
+
+            # Channel Standardization & Selection
             avail = [ch for ch in MOTOR_CHANNELS if ch in raw.ch_names]
             if len(avail) != 21:
                 continue
             raw.pick_channels(avail, ordered=True)
+            # Frequency Bandpass Filtering
             raw.filter(l_freq=8.0, h_freq=30.0, fir_design='firwin', verbose=False)
             
             events, event_id = mne.events_from_annotations(raw, verbose=False)
@@ -49,7 +51,7 @@ def extract_subject_epochs(subject_id: int, runs: list):
                     labels.append(1)
                     
             if valid_events:
-                # Crop to active motor imagery window: 0.5s to 2.5s post-cue
+                # Reaction-Latency Window Cropping to active motor imagery window: 0.5s to 2.5s post-cue
                 epochs = mne.Epochs(
                     raw, np.array(valid_events), tmin=0.5, tmax=2.5,
                     baseline=None, preload=True, verbose=False
@@ -70,7 +72,8 @@ def train_and_save_global_model():
     
     print("[1/4] Extracting reaction-latency cropped epochs (t=0.5s to 2.5s)...", flush=True)
     X_list, y_list, groups_list = [], [], []
-    
+
+    # Subject Data Ingestion
     for sub in range(1, 61):
         X_s, y_s = extract_subject_epochs(sub, runs=[4, 8, 12])  # Imagery runs
         if X_s is not None:
@@ -86,9 +89,11 @@ def train_and_save_global_model():
     print(f"      Loaded {n_trials} trials across {len(np.unique(groups))} subjects ({n_samples} samples/trial).", flush=True)
     
     print("[2/4] Estimating Covariances & Applying Per-Subject ESA...", flush=True)
+    # Shrinkage Covariance Estimation
     cov_estimator = Covariances(estimator='lwf')
     C_raw = cov_estimator.fit_transform(X)
-    
+
+    # for each Subject, Mean Reference Calculation
     C_aligned = np.zeros_like(C_raw)
     for sub in np.unique(groups):
         sub_mask = (groups == sub)
@@ -97,18 +102,23 @@ def train_and_save_global_model():
         inv_R = inv_sqrt_m(R_sub)
         
         for idx in np.where(sub_mask)[0]:
+            # Euclidean Space Alignment (ESA)
             C_aligned[idx] = inv_R @ C_raw[idx] @ inv_R
 
     print("[3/4] Fitting Riemannian Tangent Space & Classifier...", flush=True)
+    # Riemannian Tangent Projection
     ts = TangentSpace(metric='riemann')
     T_all = ts.fit_transform(C_aligned)
-    
+
+    # Feature Normalization
     scaler = StandardScaler()
     T_scaled = scaler.fit_transform(T_all)
-    
+
+    # Regularized Linear Classification
     clf = LogisticRegression(C=0.1, solver='lbfgs', class_weight='balanced', max_iter=1000)
     clf.fit(T_scaled, y)
-    
+
+    # Bundles all fitted transformation objects along with structural metadata
     model_artifact = {
         'cov_estimator': cov_estimator,
         'tangent_space': ts,
@@ -118,6 +128,7 @@ def train_and_save_global_model():
         'n_samples': n_samples,
         'classes': ['Left Hand', 'Right Hand']
     }
+    # Serializes the dictionary to disk at models/global_riemann_model.joblib
     joblib.dump(model_artifact, model_path)
     print(f"--> Global model successfully saved to '{model_path}'.")
 
